@@ -24,6 +24,7 @@ func setConfig() {
 	appConfig.ContractBlackList = map[string]bool{"currency": true}
 	appConfig.MaxSignatures = 1
 	appConfig.MaxTransactionSize = 50
+	appConfig.MaxTransactions = 2
 }
 
 func getTestHandler() http.HandlerFunc {
@@ -108,6 +109,34 @@ func TestValidateJSON(t *testing.T) {
 	}
 }
 
+func TestValidateMaxTransactions(t *testing.T) {
+	tests := []TestStruct{
+		{
+			description:  "invalid",
+			url:          "/",
+			body:         []byte(`[{"name": "Tony Stark"}, {"name": "Steve Rogers"},{"name": "Bruce Banner"}]`),
+			expectedBody: "{\"message\":\"TOO_MANY_TRANSACTIONS\",\"code\":400}",
+			expectedCode: 400,
+		},
+		{
+			description:  "valid",
+			url:          "/",
+			body:         []byte(`[{"name": "Tony Stark"}, {"name": "Steve Rogers"}]`),
+			expectedBody: "SUCCESS\n",
+			expectedCode: 200,
+		},
+	}
+
+	ts := httptest.NewServer(validateMaxTransactions(getTestHandler()))
+	defer ts.Close()
+
+	setConfig()
+
+	for _, tc := range tests {
+		verifyMiddleware(t, ts, tc)
+	}
+}
+
 func TestValidateContract(t *testing.T) {
 	invalidAction := Action{
 		Code:          "currency",
@@ -120,7 +149,6 @@ func TestValidateContract(t *testing.T) {
 		RefBlockNum:    "1",
 		RefBlockPrefix: "eos",
 		Expiration:     "never",
-		Scope:          []string{"testing"},
 		Actions:        []Action{invalidAction},
 		Signatures:     []string{"12345"},
 		Authorizations: []interface{}{"eosio"},
@@ -165,7 +193,6 @@ func TestValidateSignatures(t *testing.T) {
 		RefBlockNum:    "1",
 		RefBlockPrefix: "eos",
 		Expiration:     "never",
-		Scope:          []string{"testing"},
 		Actions: []Action{
 			{
 				Code:          "tokens",
@@ -225,7 +252,6 @@ func TestValidateTransactionSize(t *testing.T) {
 		RefBlockNum:    "1",
 		RefBlockPrefix: "eos",
 		Expiration:     "never",
-		Scope:          []string{"testing"},
 		Actions:        []Action{invalidAction},
 		Signatures:     []string{"12345"},
 		Authorizations: []interface{}{"eosio"},

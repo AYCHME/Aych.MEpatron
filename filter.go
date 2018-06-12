@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -34,11 +36,17 @@ type Transaction struct {
 	RefBlockNum    string        `json:"ref_block_num"`
 	RefBlockPrefix string        `json:"ref_block_prefix"`
 	Expiration     string        `json:"expiration"`
-	Scope          []string      `json:"scope"`
 	Actions        []Action      `json:"actions"`
 	Signatures     []string      `json:"signatures"`
 	Authorizations []interface{} `json:"authorizations"`
 }
+
+// Define Context Keys
+type contextKey string
+
+var (
+	transactionsKey = contextKey("transactions")
+)
 
 var client = http.Client{}
 
@@ -56,7 +64,13 @@ func getHost(r *http.Request) string {
 }
 
 // logFailure logs a failure to the Fail2Ban server
-func logFailure(message string, w http.ResponseWriter, r *http.Request) {
+func logFailure(message string, w http.ResponseWriter, r *http.Request, statusCode int) {
+
+	// Default status code
+	if statusCode < 100 {
+		statusCode = 400
+	}
+
 	remoteHost := getHost(r)
 	for _, logAgent := range appConfig.LogEndpoints {
 		if !strings.Contains(logAgent, "/patroneos/fail2ban-relay") {
@@ -78,10 +92,10 @@ func logFailure(message string, w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("Failure: %s %s", remoteHost, message)
 	if w != nil {
-		errorBody, _ := json.Marshal(ErrorMessage{Message: message, Code: 400})
+		errorBody, _ := json.Marshal(ErrorMessage{Message: message, Code: statusCode})
 		w.Header().Add("X-REJECTED-BY", "patroneos")
 		w.Header().Add("CONTENT-TYPE", "application/json")
-		w.WriteHeader(400)
+		w.WriteHeader(statusCode)
 		_, err := w.Write(errorBody)
 		if err != nil {
 			log.Printf("Error writing response body %s", err)
@@ -120,7 +134,7 @@ func validateJSON(next http.HandlerFunc) http.HandlerFunc {
 		r.Body = ioutil.NopCloser(bytes.NewBuffer(jsonBytes))
 		if len(jsonBytes) > 0 {
 			if !json.Valid(jsonBytes) || err != nil {
-				logFailure("INVALID_JSON", w, r)
+				logFailure("INVALID_JSON", w, r, 0)
 				return
 			}
 		}
@@ -132,72 +146,131 @@ func validateJSON(next http.HandlerFunc) http.HandlerFunc {
 // validateMaxSignatures checks that the transaction does not have more signatures than the max allowed.
 func validateMaxSignatures(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var transaction Transaction
 
-		jsonBytes, _ := ioutil.ReadAll(r.Body)
-		r.Body = ioutil.NopCloser(bytes.NewBuffer(jsonBytes))
-		if len(jsonBytes) > 0 {
-			err := json.Unmarshal(jsonBytes, &transaction)
-			if err != nil {
-				logFailure("PARSING_ERROR", w, r)
-				return
-			}
+		transactions, ctx, err := getTransactions(r)
+		if err != nil {
+			logFailure(err.Error(), w, r, 0)
+			return
+		}
+
+		for _, transaction := range transactions {
 			if len(transaction.Signatures) > appConfig.MaxSignatures {
-				logFailure("INVALID_NUMBER_SIGNATURES", w, r)
+				logFailure("INVALID_NUMBER_SIGNATURES", w, r, 0)
 				return
 			}
 		}
-		next.ServeHTTP(w, r)
+
+		next.ServeHTTP(w, r.WithContext(ctx))
 	}
 }
 
 // validateContract checks that the transaction does not act on a blacklisted contract.
 func validateContract(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var transaction Transaction
 
-		jsonBytes, _ := ioutil.ReadAll(r.Body)
-		r.Body = ioutil.NopCloser(bytes.NewBuffer(jsonBytes))
-		if len(jsonBytes) > 0 {
-			err := json.Unmarshal(jsonBytes, &transaction)
-			if err != nil {
-				logFailure("PARSING_ERROR", w, r)
-				return
-			}
+		transactions, ctx, err := getTransactions(r)
+		if err != nil {
+			logFailure(err.Error(), w, r, 0)
+			return
+		}
 
+		for _, transaction := range transactions {
 			for _, action := range transaction.Actions {
 				_, exists := appConfig.ContractBlackList[action.Code]
 				if exists {
-					logFailure("BLACKLISTED_CONTRACT", w, r)
+					logFailure("BLACKLISTED_CONTRACT", w, r, 0)
 					return
 				}
 			}
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	}
+}
+
+// validateMaxTransactions checks that the number of transactions in the request does not exceed the defined maximum.
+func validateMaxTransactions(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		transactions, ctx, err := getTransactions(r)
+
+		if err != nil {
+			logFailure(err.Error(), w, r, 0)
+			return
+		}
+
+		// Skip this middleware if MaxTransactions is not configured, or set to 0
+		if appConfig.MaxTransactions > 0 {
+			if len(transactions) > appConfig.MaxTransactions {
+				logFailure("TOO_MANY_TRANSACTIONS", w, r, 0)
+				return
+			}
+		}
+
+		next.ServeHTTP(w, r.WithContext(ctx))
 	}
 }
 
 // validateTransactionSize checks that the transaction data does not exceed the max allowed size.
 func validateTransactionSize(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		jsonBytes, _ := ioutil.ReadAll(r.Body)
-		r.Body = ioutil.NopCloser(bytes.NewBuffer(jsonBytes))
-		if len(jsonBytes) > 0 {
-			var transaction Transaction
-			err := json.Unmarshal(jsonBytes, &transaction)
-			if err != nil {
-				logFailure("PARSING_ERROR", w, r)
-				return
-			}
+
+		transactions, ctx, err := getTransactions(r)
+		if err != nil {
+			logFailure(err.Error(), w, r, 0)
+			return
+		}
+
+		for _, transaction := range transactions {
 			for _, action := range transaction.Actions {
 				if len(action.Data) > appConfig.MaxTransactionSize {
-					logFailure("INVALID_TRANSACTION_SIZE", w, r)
+					logFailure("INVALID_TRANSACTION_SIZE", w, r, 0)
 					return
 				}
 			}
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	}
+}
+
+// getTransactions parses json and returns a slice containing the transactions
+func getTransactions(r *http.Request) ([]Transaction, context.Context, error) {
+	var transactions []Transaction
+	var transaction Transaction
+
+	// Context has not been set
+	if r.Context().Value(transactionsKey) == nil {
+		// Read request body
+		jsonBytes, _ := ioutil.ReadAll(r.Body)
+		r.Body = ioutil.NopCloser(bytes.NewBuffer(jsonBytes))
+
+		// Determine if JSON is a single object or an array of objects
+		body := strings.TrimSpace(string(jsonBytes))
+
+		if strings.HasPrefix(body, "{") {
+			// Single Object
+			err := json.Unmarshal(jsonBytes, &transaction)
+
+			if err != nil {
+				return nil, nil, errors.New("PARSE_ERROR")
+			}
+
+			transactions = append(transactions, transaction)
+		} else if strings.HasPrefix(body, "[") {
+			// Array of Objects
+			err := json.Unmarshal(jsonBytes, &transactions)
+
+			if err != nil {
+				return nil, nil, errors.New("PARSE_ERROR")
+			}
+		}
+
+		// Add transactions to request context so subsequent middleware does not have to parse the transactions again
+		ctx := context.WithValue(r.Context(), transactionsKey, transactions)
+		return transactions, ctx, nil
+	}
+
+	// Context already exists
+	transactions = r.Context().Value(transactionsKey).([]Transaction)
+	return transactions, r.Context(), nil
 }
 
 // Walks through the middleware list in reverse order and
@@ -218,10 +291,6 @@ func chainMiddleware(mw ...middleware) middleware {
 
 func copyHeaders(response http.Header, request http.Header) {
 	for key, value := range request {
-		// Let our server set the Content-Length
-		if key == "Content-Length" {
-			continue
-		}
 		for _, header := range value {
 			response.Add(key, header)
 		}
@@ -240,13 +309,19 @@ func forwardCallToNodeos(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		log.Printf("Error in creating request %s", err)
+		logFailure("NODEOS_REQUEST_NOT_CREATED", w, r, 500)
 		return
 	}
+
+	// Forward headers to nodeos
+	request.Header = make(http.Header)
+	copyHeaders(request.Header, r.Header)
 
 	res, err := client.Do(request)
 
 	if err != nil {
 		log.Printf("Error in executing request %s", err)
+		logFailure("NODEOS_UNREACHABLE", w, r, 503)
 		return
 	}
 
@@ -257,7 +332,7 @@ func forwardCallToNodeos(w http.ResponseWriter, r *http.Request) {
 	if res.StatusCode == 200 {
 		logSuccess("SUCCESS", r)
 	} else {
-		logFailure("TRANSACTION_FAILED", nil, r)
+		logFailure("TRANSACTION_FAILED", nil, r, 0)
 	}
 
 	copyHeaders(w.Header(), res.Header)
@@ -288,6 +363,7 @@ func addFilterHandlers(mux *http.ServeMux) {
 	// Middleware are executed in the order that they are passed to chainMiddleware.
 	middlewareChain := chainMiddleware(
 		validateJSON,
+		validateMaxTransactions,
 		validateTransactionSize,
 		validateMaxSignatures,
 		validateContract,
