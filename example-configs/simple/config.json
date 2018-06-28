@@ -1,4 +1,5 @@
 {
+    "listenIP": "",
     "listenPort": "8080",
 
     "nodeosProtocol": "http",
@@ -10,5 +11,9 @@
     },
     "maxSignatures": 10,
     "maxTransactionSize": 1000000,
-    "maxTransactions": 32
+    "maxTransactions": 32,
+    "headers": {
+        "Access-Control-Allow-Origin": "*",
+        "Server": ""
+    }
 }

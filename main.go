@@ -8,27 +8,34 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 )
 
 // Config defines the application configuration
 type Config struct {
-	ListenPort         string          `json:"listenPort"`
-	NodeosProtocol     string          `json:"nodeosProtocol"`
-	NodeosURL          string          `json:"nodeosUrl"`
-	NodeosPort         string          `json:"nodeosPort"`
-	ContractBlackList  map[string]bool `json:"contractBlackList"`
-	MaxSignatures      int             `json:"maxSignatures"`
-	MaxTransactionSize int             `json:"maxTransactionSize"`
-	MaxTransactions    int             `json:"maxTransactions"`
-	LogEndpoints       []string        `json:"logEndpoints"`
-	FilterEndpoints    []string        `json:"filterEndpoints"`
-	LogFileLocation    string          `json:"logFileLocation"`
+	ListenIP           string            `json:"listenIP"`
+	ListenPort         string            `json:"listenPort"`
+	NodeosProtocol     string            `json:"nodeosProtocol"`
+	NodeosURL          string            `json:"nodeosUrl"`
+	NodeosPort         string            `json:"nodeosPort"`
+	ContractBlackList  map[string]bool   `json:"contractBlackList"`
+	MaxSignatures      int               `json:"maxSignatures"`
+	MaxTransactionSize int               `json:"maxTransactionSize"`
+	MaxTransactions    int               `json:"maxTransactions"`
+	LogEndpoints       []string          `json:"logEndpoints"`
+	FilterEndpoints    []string          `json:"filterEndpoints"`
+	LogFileLocation    string            `json:"logFileLocation"`
+	Headers            map[string]string `json:"headers"`
 }
 
-var configFile string
-var operatingMode string
-
-var appConfig Config
+var (
+	configFile    string // path to config.json
+	operatingMode string // operating mode (filter or relay)
+	version       string // application version
+	commit        string // sha1 commit hash used to build application
+	buildDate     string // compilation date
+	appConfig     Config // configuration fields
+)
 
 // updateConfig allows the configuration to be updated via POST requests.
 func updateConfig(w http.ResponseWriter, r *http.Request) {
@@ -66,9 +73,16 @@ func parseArgs() {
 		defaultConfigLocation = "./config.json"
 		defaultOperatingMode  = "filter"
 		defaultShowHelp       = false
+		defaultShowVersion    = false
 	)
-	var showHelp bool
+
+	var (
+		showHelp    bool
+		showVersion bool
+	)
+
 	flag.BoolVar(&showHelp, "h", defaultShowHelp, "shows application help")
+	flag.BoolVar(&showVersion, "v", defaultShowVersion, "show application version")
 	flag.StringVar(&configFile, "configFile", defaultConfigLocation, "location of the file used for application configuration")
 	flag.StringVar(&operatingMode, "mode", defaultOperatingMode, "mode in which the application will run")
 
@@ -76,7 +90,23 @@ func parseArgs() {
 
 	if showHelp {
 		flag.Usage()
-		os.Exit(1)
+		os.Exit(0)
+	}
+
+	if showVersion {
+		var buildDateTime string
+
+		date, err := time.Parse("2006-01-02T15:04:05Z-0700", buildDate)
+
+		if err != nil {
+			log.Printf("Error parsing build date: %v", err)
+			buildDateTime = ""
+		} else {
+			buildDateTime = date.In(time.Local).String()
+		}
+
+		fmt.Printf("Version: %v\nGit Commit: %v\nBuilt on: %v\n", version, commit, buildDateTime)
+		os.Exit(0)
 	}
 }
 
@@ -112,5 +142,5 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Fatal(http.ListenAndServe(":"+appConfig.ListenPort, mux))
+	log.Fatal(http.ListenAndServe(appConfig.ListenIP+":"+appConfig.ListenPort, mux))
 }
